@@ -3,6 +3,9 @@
 #include <dlfcn.h>
 #include "include/libnvml_hook.h"
 #include "include/nvml-subset.h"
+#include "include/nvml_prefix.h"
+#include "include/nvml_override.h"
+#include <nvml.h>
 #include "include/utils.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
@@ -350,7 +353,8 @@ void nvml_postInit() {
 // This is more accurate than tracking allocations ourselves
 static uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    // Use nvmlProcessInfo_t from nvml-subset.h (standard type)
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     
     // Get the real NVML function (bypass our hook to avoid recursion)
     nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, 

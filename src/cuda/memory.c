@@ -618,7 +618,7 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
 }
 
 CUresult cuMemCreate ( CUmemGenericAllocationHandle* handle, size_t size, const CUmemAllocationProp* prop, unsigned long long flags ) {
-    LOG_INFO("cuMemCreate:%lld:%d", size, prop->location.id);
+    LOG_INFO("cuMemCreate:%zu:%d", size, prop->location.id);
     ENSURE_RUNNING();
     CUdevice dev;
     CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev);

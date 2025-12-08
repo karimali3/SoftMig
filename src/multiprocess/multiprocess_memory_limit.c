@@ -21,6 +21,9 @@
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
+// Forward declaration - defined in config_file.c
+extern int is_softmig_configured(void);
+
 
 #ifndef SEM_WAIT_TIME
 #define SEM_WAIT_TIME 10
@@ -92,7 +95,7 @@ void sig_swap_stub(int signo){
 
 // External function from config_file.c - reads from config file or env
 extern size_t get_limit_from_config_or_env(const char* env_name);
-extern int is_softmig_configured(void);
+// is_softmig_configured is declared above
 
 // get device memory from config file (priority) or env (fallback)
 // This is now a wrapper that calls the config file reader
