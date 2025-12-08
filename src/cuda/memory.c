@@ -643,7 +643,7 @@ CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
 }
 
 CUresult cuMemMap( CUdeviceptr ptr, size_t size, size_t offset, CUmemGenericAllocationHandle handle, unsigned long long flags ) {
-    LOG_INFO("cuMemMap:%lld(%llx,%llx)", size, ptr, offset);
+    LOG_INFO("cuMemMap:%zu(%llx,%zu)", size, ptr, offset);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemMap,ptr,size,offset,handle,flags);
     return res;
 }
