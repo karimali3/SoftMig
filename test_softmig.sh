@@ -327,44 +327,32 @@ if [ -n "$MAIN_LOG" ] && [ -f "$MAIN_LOG" ]; then
     tail -20 "$MAIN_LOG" | sed 's/^/  /'
     echo ""
     
-    # Check for process summing logs (optional - these may not exist in all versions)
-    echo "=== Checking for Process Summing Logs (Optional) ==="
-    if grep -q "into nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null; then
-        COUNT=$(grep -c "into nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null)
-        echo "  ✅ Found $COUNT calls to nvmlDeviceGetMemoryInfo"
-    else
-        echo "  ⚠️  No 'into nvmlDeviceGetMemoryInfo' logs found (may be reduced logging)"
-        echo "     This is normal if logging verbosity is reduced"
-    fi
-    
-    if grep -q "get_current_device_memory_usage.*Found.*processes" "$MAIN_LOG" 2>/dev/null; then
+    # Check for process summing logs
+    echo "=== Checking for Process Memory Summing ==="
+    if grep -q "sum_process_memory_from_nvml" "$MAIN_LOG" 2>/dev/null; then
         echo "  ✅ Found process summing logs:"
-        grep "get_current_device_memory_usage.*Found.*processes" "$MAIN_LOG" | tail -3 | sed 's/^/    /'
-    else
-        echo "  ⚠️  No process summing logs found (may not be in this version)"
-    fi
-    
-    if grep -q "Manual sum" "$MAIN_LOG" 2>/dev/null; then
-        echo "  ✅ Found manual sum logs:"
-        grep "Manual sum" "$MAIN_LOG" | tail -3 | sed 's/^/    /'
-    else
-        echo "  ⚠️  No manual sum logs found (may not be in this version)"
-    fi
-    
-    if grep -q "Process\[.*PID=" "$MAIN_LOG" 2>/dev/null; then
-        echo "  ✅ Found process detail logs (showing last 5):"
+        echo ""
+        echo "  Process details (last call):"
         grep "Process\[.*PID=" "$MAIN_LOG" | tail -5 | sed 's/^/    /'
+        echo ""
+        echo "  Summary (last call):"
+        grep "sum_process_memory_from_nvml: Total usage" "$MAIN_LOG" | tail -1 | sed 's/^/    /'
+        echo ""
+        COUNT=$(grep -c "sum_process_memory_from_nvml: Found" "$MAIN_LOG" 2>/dev/null)
+        echo "  Total calls to sum_process_memory_from_nvml: $COUNT"
     else
-        echo "  ⚠️  No process detail logs found (may not be in this version)"
+        echo "  ⚠️  No process summing logs found"
+        echo "     (sum_process_memory_from_nvml may not be called, or logging level too low)"
+        echo "     Set LIBCUDA_LOG_LEVEL=3 or higher to see these logs"
     fi
     
     echo ""
-    echo "=== Debug: get_current_device_memory_usage calls (Optional) ==="
-    if grep -q "get_current_device_memory_usage" "$MAIN_LOG" 2>/dev/null; then
-        echo "  Found calls (showing last 5):"
-        grep "get_current_device_memory_usage" "$MAIN_LOG" | tail -5 | sed 's/^/    /'
+    echo "=== nvmlDeviceGetMemoryInfo Usage ==="
+    if grep -q "nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null; then
+        COUNT=$(grep -c "nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null)
+        echo "  Found $COUNT references to nvmlDeviceGetMemoryInfo"
     else
-        echo "  ⚠️  No calls to get_current_device_memory_usage found (may be reduced logging)"
+        echo "  ⚠️  No nvmlDeviceGetMemoryInfo references found"
     fi
 else
     echo "  ⚠️  No main log file found"

@@ -362,13 +362,18 @@ static uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     
     // Get the real NVML function (bypass our hook to avoid recursion)
+    // Note: nvmlDeviceGetComputeRunningProcesses is mapped to _v2 via prefix header
     nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, 
                                                    nvmlDeviceGetComputeRunningProcesses, 
                                                    device, &process_count, infos);
     
+    LOG_INFO("sum_process_memory_from_nvml: nvmlDeviceGetComputeRunningProcesses returned %d, process_count=%u", ret, process_count);
+    
     if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
         // If we can't get process info, fall back to tracked usage
-        LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses failed: %d, falling back to tracked usage", ret);
+        LOG_WARN("nvmlDeviceGetComputeRunningProcesses failed: %d (%s), falling back to tracked usage", 
+                 ret, (ret == NVML_ERROR_UNINITIALIZED ? "UNINITIALIZED" : 
+                       ret == NVML_ERROR_INVALID_ARGUMENT ? "INVALID_ARGUMENT" : "OTHER"));
         return 0;  // Return 0 to trigger fallback
     }
     
@@ -376,15 +381,28 @@ static uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     const uint64_t PER_PROCESS_OVERHEAD = 2 * 1024 * 1024;  // 2 MB overhead per process
     const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;  // NVML constant for unavailable values
     
+    LOG_INFO("sum_process_memory_from_nvml: Found %u processes on device", process_count);
+    
     // Sum up memory from all processes
     for (unsigned int i = 0; i < process_count; i++) {
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
-            total_usage += infos[i].usedGpuMemory;
-            // Add small overhead per process (a few MB as user suggested)
-            total_usage += PER_PROCESS_OVERHEAD;
+            uint64_t process_mem = infos[i].usedGpuMemory;
+            uint64_t process_mem_with_overhead = process_mem + PER_PROCESS_OVERHEAD;
+            total_usage += process_mem_with_overhead;
+            LOG_INFO("  Process[%u] PID=%u: %llu bytes (%.2f MiB) + %llu overhead = %llu bytes (%.2f MiB)", 
+                     i, infos[i].pid, 
+                     (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
+                     (unsigned long long)PER_PROCESS_OVERHEAD,
+                     (unsigned long long)process_mem_with_overhead, process_mem_with_overhead / (1024.0 * 1024.0));
+        } else {
+            LOG_DEBUG("  Process[%u] PID=%u: skipped (usedGpuMemory=%llu)", 
+                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory);
         }
     }
+    
+    LOG_INFO("sum_process_memory_from_nvml: Total usage = %llu bytes (%.2f MiB)", 
+             (unsigned long long)total_usage, total_usage / (1024.0 * 1024.0));
     
     return total_usage;
 }
@@ -427,13 +445,25 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
     
     // Fallback to tracked usage if NVML query failed
     if (usage == 0) {
+        LOG_INFO("sum_process_memory_from_nvml returned 0, falling back to tracked usage");
         usage = get_current_device_memory_usage(cudadev);
+        LOG_INFO("Tracked usage fallback: %llu bytes (%.2f MiB)", 
+                 (unsigned long long)usage, usage / (1024.0 * 1024.0));
     }
     
     // Ensure usage doesn't exceed limit
     if (usage > limit) {
+        LOG_WARN("Calculated usage (%llu bytes, %.2f MiB) exceeds limit (%llu bytes, %.2f MiB), capping to limit",
+                 (unsigned long long)usage, usage / (1024.0 * 1024.0),
+                 (unsigned long long)limit, limit / (1024.0 * 1024.0));
         usage = limit;
     }
+    
+    LOG_INFO("_nvmlDeviceGetMemoryInfo: limit=%llu bytes (%.2f MiB), usage=%llu bytes (%.2f MiB), free=%llu bytes (%.2f MiB)",
+             (unsigned long long)limit, limit / (1024.0 * 1024.0),
+             (unsigned long long)usage, usage / (1024.0 * 1024.0),
+             (unsigned long long)(limit > usage ? (limit - usage) : 0), 
+             (limit > usage ? (limit - usage) : 0) / (1024.0 * 1024.0));
     
     switch (version) {
     case 1:
