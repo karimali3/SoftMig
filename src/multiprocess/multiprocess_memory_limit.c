@@ -15,13 +15,10 @@
 #include <assert.h>
 #include <cuda.h>
 #include "include/nvml_prefix.h"
-// Don't include <nvml.h> - it conflicts with nvml-subset.h
-// Use nvml-subset.h via libnvml_hook.h instead
-#include "include/nvml-subset.h"  // For NVML types
+#include <nvml.h>
 
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
-#include "include/libnvml_hook.h"  // For NVML_FIND_ENTRY and driver_sym_t
 #include "multiprocess/multiprocess_memory_limit.h"
 
 // Forward declaration - defined in config_file.c
@@ -111,46 +108,12 @@ int init_device_info() {
         return 0;  // No-op when softmig is disabled
     }
     unsigned int i,nvmlDevicesCount;
-    // Use NVML override mechanism (if available)
-    if (!nvml_symbols_available()) {
-        // In standalone tools, we can't query NVML, so use a default
-        LOG_WARN("NVML symbols not available, using default device count");
-        region_info.shared_region->device_num = 1;  // Default to 1 device
-        return 0;
-    }
-    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2);
-    if (entry == NULL) {
-        LOG_ERROR("nvmlDeviceGetCount_v2 not found");
-        return 0;
-    }
-    nvmlReturn_t ret = entry(&nvmlDevicesCount);
-    if (ret != NVML_SUCCESS) {
-        LOG_ERROR("nvmlDeviceGetCount_v2 failed: %d", ret);
-        return 0;
-    }
+    CHECK_NVML_API(nvmlDeviceGetCount_v2(&nvmlDevicesCount));
     region_info.shared_region->device_num=nvmlDevicesCount;
     nvmlDevice_t dev;
-    entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
-    if (entry == NULL) {
-        LOG_ERROR("nvmlDeviceGetHandleByIndex not found");
-        return 0;
-    }
-    driver_sym_t uuid_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetUUID);
-    if (uuid_entry == NULL) {
-        LOG_ERROR("nvmlDeviceGetUUID not found");
-        return 0;
-    }
     for(i=0;i<nvmlDevicesCount;i++){
-        ret = entry(i, &dev);
-        if (ret != NVML_SUCCESS) {
-            LOG_ERROR("nvmlDeviceGetHandleByIndex failed for device %u: %d", i, ret);
-            return 0;
-        }
-        ret = uuid_entry(dev, region_info.shared_region->uuids[i], NVML_DEVICE_UUID_V2_BUFFER_SIZE);
-        if (ret != NVML_SUCCESS) {
-            LOG_ERROR("nvmlDeviceGetUUID failed for device %u: %d", i, ret);
-            return 0;
-        }
+        CHECK_NVML_API(nvmlDeviceGetHandleByIndex(i, &dev));
+        CHECK_NVML_API(nvmlDeviceGetUUID(dev,region_info.shared_region->uuids[i],NVML_DEVICE_UUID_V2_BUFFER_SIZE));
     }
     return 0;
 }
@@ -343,47 +306,17 @@ int init_gpu_device_utilization(){
 }
 
 uint64_t nvml_get_device_memory_usage(const int dev) {
-    if (!nvml_symbols_available()) {
-        // In standalone tools, fall back to tracked usage
-        return get_gpu_memory_usage(dev);
-    }
     nvmlDevice_t ndev;
     nvmlReturn_t ret;
-    // Use NVML override mechanism to get device handle
-    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
-    if (entry == NULL) {
-        LOG_ERROR("NVML nvmlDeviceGetHandleByIndex not found");
-        return get_gpu_memory_usage(dev);
-    }
-    ret = entry(dev, &ndev);
+    ret = nvmlDeviceGetHandleByIndex(dev, &ndev);
     if (ret != NVML_SUCCESS) {
-        // Get error string via override mechanism
-        driver_sym_t err_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlErrorString);
-        const char* err_str = "unknown";
-        if (err_entry != NULL) {
-            err_str = ((const char*(*)(nvmlReturn_t))err_entry)(ret);
-        }
-        LOG_ERROR("NVML get device %d error, %s", dev, err_str);
-        return get_gpu_memory_usage(dev);
+        LOG_ERROR("NVML get device %d error, %s", dev, nvmlErrorString(ret));
     }
     unsigned int pcnt = SHARED_REGION_MAX_PROCESS_NUM;
-    // Use nvmlProcessInfo_t from nvml-subset.h (same as nvmlProcessInfo_v1_t)
-    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
-    entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses);
-    if (entry == NULL) {
-        LOG_ERROR("NVML nvmlDeviceGetComputeRunningProcesses not found");
-        return get_gpu_memory_usage(dev);
-    }
-    ret = entry(ndev, &pcnt, infos);
-    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-        // Get error string via override mechanism
-        driver_sym_t err_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlErrorString);
-        const char* err_str = "unknown";
-        if (err_entry != NULL) {
-            err_str = ((const char*(*)(nvmlReturn_t))err_entry)(ret);
-        }
-        LOG_ERROR("NVML get process error, %s", err_str);
-        return get_gpu_memory_usage(dev);
+    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    ret = nvmlDeviceGetComputeRunningProcesses(ndev, &pcnt, infos);
+    if (ret != NVML_SUCCESS) {
+        LOG_ERROR("NVML get process error, %s", nvmlErrorString(ret));
     }
     int i = 0;
     uint64_t usage = 0;
@@ -1001,78 +934,17 @@ uint64_t get_current_device_memory_monitor(const int dev) {
     return result;
 }
 
-// Forward declaration - implemented in src/nvml/hook.c (may not be available in standalone tools)
-// For standalone tools like shrreg-tool, provide weak stubs
-extern uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) __attribute__((weak));
-extern entry_t nvml_library_entry[] __attribute__((weak));
-
-// Weak stub implementations for standalone tools (will be overridden if nvml_mod is linked)
-uint64_t __attribute__((weak)) sum_process_memory_from_nvml(nvmlDevice_t device) {
-    (void)device;  // Unused
-    return 0;  // Indicates NVML not available
-}
-
-entry_t __attribute__((weak)) nvml_library_entry[] = { {NULL, NULL} };
-
-// Helper function to check if NVML symbols are available
-static int nvml_symbols_available(void) {
-    // Check if nvml_library_entry is available (not just a stub)
-    // In standalone tools like shrreg-tool, this will be the stub
-    return (nvml_library_entry != NULL && nvml_library_entry[0].name != NULL);
-}
-
-// Helper function to get NVML device from CUDA device ID
-static nvmlDevice_t get_nvml_device_from_cuda(int cudadev) {
-    if (!nvml_symbols_available()) {
-        return NULL;
-    }
-    nvmlDevice_t nvml_device;
-    unsigned int nvml_index = cuda_to_nvml_map(cudadev);
-    if (nvml_index >= CUDA_DEVICE_MAX_COUNT) {
-        return NULL;
-    }
-    // Use the NVML override mechanism to get device handle
-    // We need to call the real NVML function, not our hook
-    nvmlReturn_t ret;
-    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
-    if (entry == NULL) {
-        return NULL;
-    }
-    ret = entry(nvml_index, &nvml_device);
-    if (ret != NVML_SUCCESS) {
-        return NULL;
-    }
-    return nvml_device;
-}
-
 uint64_t get_current_device_memory_usage(const int dev) {
+    uint64_t result;
     ensure_initialized();
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No usage tracking when softmig is disabled
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
-        return 0;
     }
-    
-    // Try NVML process summing first (more accurate, works even for unhooked allocations)
-    // Only if NVML symbols are available (not in standalone tools)
-    if (nvml_symbols_available()) {
-        nvmlDevice_t nvml_device = get_nvml_device_from_cuda(dev);
-        if (nvml_device != NULL) {
-            uint64_t nvml_usage = sum_process_memory_from_nvml(nvml_device);
-            if (nvml_usage > 0) {
-                // Successfully got usage from NVML
-                return nvml_usage;
-            }
-            // If NVML returned 0, it might mean no processes or query failed
-            // Fall through to tracked usage as fallback
-        }
-    }
-    
-    // Fallback to old tracking system (only for processes we've hooked)
-    // This is the only option in standalone tools like shrreg-tool
-    uint64_t result = get_gpu_memory_usage(dev);
+    result = get_gpu_memory_usage(dev);
+//    result= nvml_get_device_memory_usage(dev);
     return result;
 }
 
