@@ -3,6 +3,10 @@
 #include "include/libcuda_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
+// Forward declarations for lock functions
+extern void lock_shrreg();
+extern void unlock_shrreg();
+
 
 size_t BITSIZE = 512;
 size_t IPCSIZE = 2097152;
@@ -101,13 +105,23 @@ void allocator_init() {
 }
 
 int add_chunk(CUdeviceptr *address, size_t size) {
+    // Note: This function should be called while holding the mutex (from allocate_raw)
+    // We also hold lock_shrreg() during the entire check+allocate+update to prevent
+    // race conditions where multiple processes see the same available memory
     size_t addr=0;
     size_t allocsize;
     CUresult res = CUDA_SUCCESS;
     CUdevice dev;
     cuCtxGetDevice(&dev);
-    if (oom_check(dev,size))
+    
+    // Lock shared region for atomic check+allocate+update
+    lock_shrreg();
+    
+    // Check OOM while holding both locks (atomic with allocation)
+    if (oom_check(dev,size)) {
+        unlock_shrreg();
         return CUDA_ERROR_OUT_OF_MEMORY;
+    }
     
     allocated_list_entry *e;
     INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
@@ -119,6 +133,7 @@ int add_chunk(CUdeviceptr *address, size_t size) {
     }
     if (res!=CUDA_SUCCESS){
         LOG_ERROR("cuMemoryAllocate failed res=%d",res);
+        unlock_shrreg();
         return res;
     }
     LIST_ADD(device_overallocated,e);
@@ -126,17 +141,25 @@ int add_chunk(CUdeviceptr *address, size_t size) {
     *address = e->entry->address;
     allocsize = size;
     cuCtxGetDevice(&dev);
+    // Update usage tracking while still holding both locks (atomic with check+allocate)
     add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
+    
+    // Release shared region lock
+    unlock_shrreg();
     return 0;
 }
 
 int add_chunk_only(CUdeviceptr address, size_t size) {
     pthread_mutex_lock(&mutex);
+    // Also lock shared region for atomic check+update (allocation already happened)
+    lock_shrreg();
+    
     size_t addr=0;
     size_t allocsize;
     CUdevice dev;
     cuCtxGetDevice(&dev);
     if (oom_check(dev,size)){
+        unlock_shrreg();
         pthread_mutex_unlock(&mutex);
         return -1;
     }
@@ -148,6 +171,8 @@ int add_chunk_only(CUdeviceptr address, size_t size) {
     allocsize = size;
     cuCtxGetDevice(&dev);
     add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
+    
+    unlock_shrreg();
     pthread_mutex_unlock(&mutex);
     return 0;
 }
