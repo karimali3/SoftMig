@@ -380,7 +380,8 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     }
     
     uint64_t total_usage = 0;
-    const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
+    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
+    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
     const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;  // NVML constant for unavailable values
     
     // Get current user's UID to filter processes
@@ -388,40 +389,74 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     
     LOG_INFO("sum_process_memory_from_nvml: Found %u processes on device, filtering for UID %u", process_count, current_uid);
     
+    unsigned int included_count = 0;
+    unsigned int skipped_count = 0;
+    
     // Sum up memory from all processes belonging to current user
     for (unsigned int i = 0; i < process_count; i++) {
         // Check if process belongs to current user
         uid_t proc_uid = proc_get_uid(infos[i].pid);
-        if (proc_uid == (uid_t)-1 || proc_uid != current_uid) {
-            LOG_DEBUG("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
+        int should_include = 0;
+        
+        if (proc_uid == (uid_t)-1) {
+            // Couldn't read UID - check if PID is in our tracked shared region as fallback
+            // (processes in shared region belong to current user)
+            // We need to check both pid and hostpid fields
+            int found_in_tracked = 0;
+            if (region_info.shared_region != NULL) {
+                lock_shrreg();
+                for (int slot = 0; slot < region_info.shared_region->proc_num; slot++) {
+                    if (region_info.shared_region->procs[slot].pid == infos[i].pid ||
+                        region_info.shared_region->procs[slot].hostpid == infos[i].pid) {
+                        found_in_tracked = 1;
+                        break;
+                    }
+                }
+                unlock_shrreg();
+            }
+            if (found_in_tracked) {
+                should_include = 1;
+                LOG_INFO("  Process[%u] PID=%u: including (could not read UID, but found in tracked processes)", 
+                         i, infos[i].pid);
+            } else {
+                LOG_INFO("  Process[%u] PID=%u: skipping (could not read UID from /proc/%d/status and not in tracked processes)", 
+                         i, infos[i].pid, infos[i].pid);
+                skipped_count++;
+                continue;
+            }
+        } else if (proc_uid != current_uid) {
+            LOG_INFO("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
                      i, infos[i].pid, proc_uid, current_uid);
+            skipped_count++;
             continue;
+        } else {
+            should_include = 1;
         }
+        
+        included_count++;
         
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
             uint64_t process_mem = infos[i].usedGpuMemory;
-            // Ensure each process has at least MIN_PROCESS_MEMORY
-            uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
+            // Add 5% overhead, then ensure minimum
+            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
-            if (process_mem < MIN_PROCESS_MEMORY) {
-                LOG_INFO("  Process[%u] PID=%u (UID %u): %llu bytes (%.2f MiB) -> minimum %llu bytes (%.2f MiB)", 
-                         i, infos[i].pid, proc_uid,
-                         (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
-                         (unsigned long long)process_mem_counted, process_mem_counted / (1024.0 * 1024.0));
-            } else {
-                LOG_INFO("  Process[%u] PID=%u (UID %u): %llu bytes (%.2f MiB)", 
-                         i, infos[i].pid, proc_uid,
-                         (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0));
-            }
+            LOG_INFO("  Process[%u] PID=%u (UID %u): %llu bytes (%.2f MiB) + 5%% = %llu bytes (%.2f MiB)", 
+                     i, infos[i].pid, proc_uid,
+                     (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
+                     (unsigned long long)process_mem_counted, process_mem_counted / (1024.0 * 1024.0));
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
-            LOG_DEBUG("  Process[%u] PID=%u (UID %u): usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
+            LOG_INFO("  Process[%u] PID=%u (UID %u): usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
                      i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory,
                      (unsigned long long)MIN_PROCESS_MEMORY, MIN_PROCESS_MEMORY / (1024.0 * 1024.0));
         }
     }
+    
+    LOG_INFO("sum_process_memory_from_nvml: Included %u processes, skipped %u processes (wrong UID or couldn't read UID)", 
+             included_count, skipped_count);
     
     LOG_INFO("sum_process_memory_from_nvml: Total usage (current user only) = %llu bytes (%.2f MiB)", 
              (unsigned long long)total_usage, total_usage / (1024.0 * 1024.0));

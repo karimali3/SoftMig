@@ -229,12 +229,14 @@ size_t get_gpu_memory_monitor(const int dev) {
     }
     int i=0;
     size_t total=0;
-    const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
+    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
+    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
     lock_shrreg();
     for (i=0;i<region_info.shared_region->proc_num;i++){
         uint64_t process_mem = region_info.shared_region->procs[i].monitorused[dev];
-        // Ensure each process has at least MIN_PROCESS_MEMORY
-        uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
+        // Add 5% overhead, then ensure minimum
+        uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+        uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
         total += process_mem_counted;
     }
     unlock_shrreg();
@@ -333,14 +335,21 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
     }
     int i = 0;
     uint64_t usage = 0;
-    const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
+    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
+    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
     uid_t current_uid = getuid();  // Filter by current user
     shared_region_t* region = region_info.shared_region;
     lock_shrreg();
     for (; i < pcnt; i++) {
         // Check if process belongs to current user
         uid_t proc_uid = proc_get_uid(infos[i].pid);
-        if (proc_uid == (uid_t)-1 || proc_uid != current_uid) {
+        if (proc_uid == (uid_t)-1) {
+            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - could not read UID, skipping", infos[i].pid);
+            continue;  // Skip if we can't read UID
+        }
+        if (proc_uid != current_uid) {
+            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - UID %u != current UID %u, skipping", 
+                     infos[i].pid, proc_uid, current_uid);
             continue;  // Skip processes from other users
         }
         
@@ -349,8 +358,9 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
             if (infos[i].pid != region->procs[slot].pid)
                 continue;
             uint64_t process_mem = infos[i].usedGpuMemory;
-            // Ensure each process has at least MIN_PROCESS_MEMORY
-            uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
+            // Add 5% overhead, then ensure minimum
+            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             usage += process_mem_counted;
             break;  // Found matching PID, no need to continue searching
         }
