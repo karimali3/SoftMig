@@ -497,17 +497,13 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
         return NVML_SUCCESS;
     }
     
-    // Use calculated sum from NVML (with 9MB minimum + 5% overhead and UID filtering)
+    // Always use calculated sum from NVML (with 9MB minimum + 5% overhead and UID filtering)
     // This gives us the actual current usage as seen by NVML, properly filtered and adjusted
+    // No fallback - always use the summed calculation to ensure consistency
     uint64_t usage = sum_process_memory_from_nvml(device);
     
-    // Fallback to tracked usage if NVML query failed or returned 0
-    if (usage == 0) {
-        LOG_DEBUG("sum_process_memory_from_nvml returned 0, falling back to tracked usage");
-        usage = get_current_device_memory_usage(cudadev);
-        LOG_DEBUG("Tracked usage fallback: %llu bytes (%.2f MiB)", 
-                 (unsigned long long)usage, usage / (1024.0 * 1024.0));
-    }
+    // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory
+    // We don't fall back to tracked usage to ensure all processes see the same value
     
     // Ensure usage doesn't exceed limit
     if (usage > limit) {

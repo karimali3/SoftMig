@@ -320,21 +320,73 @@ int init_gpu_device_utilization(){
     return 1;
 }
 
-// Forward declaration for sum_process_memory_from_nvml from nvml hook
-extern uint64_t sum_process_memory_from_nvml(nvmlDevice_t device);
-
 // Get summed memory usage from NVML for a CUDA device index
 // This uses the same calculation as nvmlDeviceGetMemoryInfo (9MB min + 5% overhead + UID filtering)
+// Always uses the summed calculation - no fallback to tracked usage
 uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     unsigned int nvml_dev_idx = cuda_to_nvml_map(cuda_dev);
     nvmlDevice_t ndev;
     nvmlReturn_t ret = nvmlDeviceGetHandleByIndex(nvml_dev_idx, &ndev);
     if (ret != NVML_SUCCESS) {
-        LOG_DEBUG("get_summed_device_memory_usage_from_nvml: NVML get device %d (CUDA %d) error, %s", 
+        LOG_WARN("get_summed_device_memory_usage_from_nvml: NVML get device %d (CUDA %d) error, %s", 
                  nvml_dev_idx, cuda_dev, nvmlErrorString(ret));
-        return 0;  // Return 0 to trigger fallback
+        return 0;
     }
-    return sum_process_memory_from_nvml(ndev);
+    
+    unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
+    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
+    
+    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+        LOG_WARN("get_summed_device_memory_usage_from_nvml: nvmlDeviceGetComputeRunningProcesses failed: %d (%s)", 
+                 ret, nvmlErrorString(ret));
+        return 0;
+    }
+    
+    uint64_t total_usage = 0;
+    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
+    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
+    const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;
+    
+    // Get current user's UID to filter processes
+    uid_t current_uid = getuid();
+    
+    // Sum up memory from all processes belonging to current user
+    for (unsigned int i = 0; i < process_count; i++) {
+        // Check if process belongs to current user
+        uid_t proc_uid = proc_get_uid(infos[i].pid);
+        
+        if (proc_uid == (uid_t)-1) {
+            // Couldn't read UID - try fallback: check if PID is in our tracked processes
+            shrreg_proc_slot_t *proc = find_proc_by_hostpid(infos[i].pid);
+            if (proc == NULL) {
+                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID and not in tracked processes, skipping", 
+                         infos[i].pid);
+                continue;
+            } else {
+                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - including (could not read UID, but found in tracked processes)", 
+                         infos[i].pid);
+            }
+        } else if (proc_uid != current_uid) {
+            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (UID %u != current UID %u)", 
+                     infos[i].pid, proc_uid, current_uid);
+            continue;
+        }
+        
+        // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
+        if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
+            uint64_t process_mem = infos[i].usedGpuMemory;
+            // Add 5% overhead, then ensure minimum
+            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
+            total_usage += process_mem_counted;
+        } else {
+            // Even if NVML reports 0 or unavailable, count minimum for the process
+            total_usage += MIN_PROCESS_MEMORY;
+        }
+    }
+    
+    return total_usage;
 }
 
 uint64_t nvml_get_device_memory_usage(const int dev) {
