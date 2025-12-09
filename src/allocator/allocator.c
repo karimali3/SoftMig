@@ -41,6 +41,7 @@ size_t round_up(size_t size, size_t unit) {
 }
 
 // Internal function that doesn't lock (caller must hold lock_shrreg)
+// Uses summed NVML usage (with 9MB min + 5% overhead) to check against limit
 int oom_check_nolock(const int dev, size_t addon) {
     int count1=0;
     CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetCount,&count1);
@@ -50,25 +51,39 @@ int oom_check_nolock(const int dev, size_t addon) {
     else
         d=dev;
     uint64_t limit = get_current_device_memory_limit(d);
-    // Use get_gpu_memory_usage_nolock when we're already holding the lock
-    size_t _usage = get_gpu_memory_usage_nolock(d);
 
     if (limit == 0) {
         return 0;
     }
 
-    size_t new_allocated = _usage + addon;
-    LOG_INFO("_usage=%lu limit=%lu new_allocated=%lu",_usage,limit,new_allocated);
+    // Use summed NVML usage (with 9MB min + 5% overhead) - this is the actual current usage
+    // This ensures we check against the real summed values, not tracked usage
+    uint64_t _usage = get_summed_device_memory_usage_from_nvml(d);
+    
+    // If summed usage query failed, fall back to tracked usage
+    if (_usage == 0) {
+        LOG_DEBUG("oom_check_nolock: get_summed_device_memory_usage_from_nvml returned 0, falling back to tracked usage");
+        _usage = get_gpu_memory_usage_nolock(d);
+    }
+
+    uint64_t new_allocated = _usage + addon;
+    LOG_INFO("oom_check_nolock: _usage=%llu limit=%llu addon=%lu new_allocated=%llu", 
+             (unsigned long long)_usage, (unsigned long long)limit, addon, (unsigned long long)new_allocated);
+    
     if (new_allocated > limit) {
-        LOG_ERROR("Device %d OOM %lu / %lu (trying to allocate %lu bytes)", d, new_allocated, limit, addon);
+        LOG_ERROR("Device %d OOM %llu / %llu (trying to allocate %lu bytes)", d, (unsigned long long)new_allocated, (unsigned long long)limit, addon);
         
         // Try to clear dead processes first
         if (clear_proc_slot_nolock(1) > 0) {
-            // Recheck after clearing dead processes
-            _usage = get_gpu_memory_usage_nolock(d);
+            // Recheck after clearing dead processes - use summed usage again
+            _usage = get_summed_device_memory_usage_from_nvml(d);
+            if (_usage == 0) {
+                _usage = get_gpu_memory_usage_nolock(d);
+            }
             new_allocated = _usage + addon;
             if (new_allocated <= limit) {
-                LOG_INFO("After clearing dead processes, allocation now allowed: %lu / %lu", new_allocated, limit);
+                LOG_INFO("After clearing dead processes, allocation now allowed: %llu / %llu", 
+                         (unsigned long long)new_allocated, (unsigned long long)limit);
                 return 0;  // Allocation is now possible
             }
         }
@@ -76,8 +91,8 @@ int oom_check_nolock(const int dev, size_t addon) {
         // If still OOM and OOM killer is enabled, kill the current process
         if (enable_active_oom_killer) {
             pid_t current_pid = getpid();
-            LOG_ERROR("OOM detected and ACTIVE_OOM_KILLER enabled - killing process %d (tried to allocate %lu bytes, would exceed limit %lu)", 
-                     current_pid, addon, limit);
+            LOG_ERROR("OOM detected and ACTIVE_OOM_KILLER enabled - killing process %d (tried to allocate %lu bytes, would exceed limit %llu, current usage %llu)", 
+                     current_pid, addon, (unsigned long long)limit, (unsigned long long)_usage);
             // Send SIGKILL to current process
             kill(current_pid, SIGKILL);
             // If kill() returns, something went wrong, but we'll still return error
