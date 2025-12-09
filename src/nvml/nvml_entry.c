@@ -1,7 +1,11 @@
 #include <pthread.h>
+#include <unistd.h>
+#include <sys/types.h>
 #include "include/nvml_prefix.h"
 #include "include/libnvml_hook.h"
 #include "include/utils.h"
+#include "include/process_utils.h"
+#include "multiprocess/multiprocess_memory_limit.h"
 
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
@@ -34,9 +38,45 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index,
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
                                                   unsigned int *infoCount,
                                                   nvmlProcessInfo_t *infos) {
-  return NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry,
+  // Get all processes first
+  unsigned int original_count = *infoCount;
+  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
+  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+  
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry,
                          nvmlDeviceGetComputeRunningProcesses, device,
-                         infoCount, infos);
+                         &temp_count, all_infos);
+  
+  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+    // If call failed, pass through the error
+    *infoCount = 0;
+    return ret;
+  }
+  
+  // Filter by current user
+  uid_t current_uid = getuid();
+  unsigned int filtered_count = 0;
+  
+  for (unsigned int i = 0; i < temp_count && filtered_count < *infoCount; i++) {
+    uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+    if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+      // Process belongs to current user - include it
+      if (infos != NULL) {
+        infos[filtered_count] = all_infos[i];
+      }
+      filtered_count++;
+    }
+  }
+  
+  *infoCount = filtered_count;
+  
+  // Return appropriate status
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || filtered_count < temp_count) {
+    // Some processes were filtered out, but we have results
+    return NVML_SUCCESS;
+  }
+  
+  return ret;
 }
 /*
 nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device, nvmlPciInfo_t *pci) {
@@ -1533,9 +1573,45 @@ nvmlComputeInstanceGetInfo_v2(nvmlComputeInstance_t computeInstance,
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry,
+  // Get all processes first
+  unsigned int original_count = *infoCount;
+  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
+  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+  
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
                          nvmlDeviceGetComputeRunningProcesses_v2, device,
-                         infoCount, infos);
+                         &temp_count, all_infos);
+  
+  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+    // If call failed, pass through the error
+    *infoCount = 0;
+    return ret;
+  }
+  
+  // Filter by current user
+  uid_t current_uid = getuid();
+  unsigned int filtered_count = 0;
+  
+  for (unsigned int i = 0; i < temp_count && filtered_count < *infoCount; i++) {
+    uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+    if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+      // Process belongs to current user - include it
+      if (infos != NULL) {
+        infos[filtered_count] = all_infos[i];
+      }
+      filtered_count++;
+    }
+  }
+  
+  *infoCount = filtered_count;
+  
+  // Return appropriate status
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || filtered_count < temp_count) {
+    // Some processes were filtered out, but we have results
+    return NVML_SUCCESS;
+  }
+  
+  return ret;
 }
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {

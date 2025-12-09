@@ -325,9 +325,16 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
     int i = 0;
     uint64_t usage = 0;
     const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
+    uid_t current_uid = getuid();  // Filter by current user
     shared_region_t* region = region_info.shared_region;
     lock_shrreg();
     for (; i < pcnt; i++) {
+        // Check if process belongs to current user
+        uid_t proc_uid = proc_get_uid(infos[i].pid);
+        if (proc_uid == (uid_t)-1 || proc_uid != current_uid) {
+            continue;  // Skip processes from other users
+        }
+        
         int slot = 0;
         for (; slot < region->proc_num; slot++) {
             if (infos[i].pid != region->procs[slot].pid)

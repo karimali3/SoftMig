@@ -10,6 +10,7 @@
 #include "include/libnvml_hook.h"
 #include "include/nvml_override.h"
 #include "include/utils.h"
+#include "include/process_utils.h"
 // Note: multiprocess_memory_limit.h includes <nvml.h> in its .c file, not the .h file
 // So including the header here should be safe
 #include "multiprocess/multiprocess_memory_limit.h"
@@ -382,10 +383,21 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
     const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;  // NVML constant for unavailable values
     
-    LOG_INFO("sum_process_memory_from_nvml: Found %u processes on device", process_count);
+    // Get current user's UID to filter processes
+    uid_t current_uid = getuid();
     
-    // Sum up memory from all processes
+    LOG_INFO("sum_process_memory_from_nvml: Found %u processes on device, filtering for UID %u", process_count, current_uid);
+    
+    // Sum up memory from all processes belonging to current user
     for (unsigned int i = 0; i < process_count; i++) {
+        // Check if process belongs to current user
+        uid_t proc_uid = proc_get_uid(infos[i].pid);
+        if (proc_uid == (uid_t)-1 || proc_uid != current_uid) {
+            LOG_DEBUG("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
+                     i, infos[i].pid, proc_uid, current_uid);
+            continue;
+        }
+        
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
             uint64_t process_mem = infos[i].usedGpuMemory;
@@ -393,25 +405,25 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
             uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
             total_usage += process_mem_counted;
             if (process_mem < MIN_PROCESS_MEMORY) {
-                LOG_INFO("  Process[%u] PID=%u: %llu bytes (%.2f MiB) -> minimum %llu bytes (%.2f MiB)", 
-                         i, infos[i].pid, 
+                LOG_INFO("  Process[%u] PID=%u (UID %u): %llu bytes (%.2f MiB) -> minimum %llu bytes (%.2f MiB)", 
+                         i, infos[i].pid, proc_uid,
                          (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
                          (unsigned long long)process_mem_counted, process_mem_counted / (1024.0 * 1024.0));
             } else {
-                LOG_INFO("  Process[%u] PID=%u: %llu bytes (%.2f MiB)", 
-                         i, infos[i].pid, 
+                LOG_INFO("  Process[%u] PID=%u (UID %u): %llu bytes (%.2f MiB)", 
+                         i, infos[i].pid, proc_uid,
                          (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0));
             }
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
-            LOG_DEBUG("  Process[%u] PID=%u: usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
-                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory,
+            LOG_DEBUG("  Process[%u] PID=%u (UID %u): usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
+                     i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory,
                      (unsigned long long)MIN_PROCESS_MEMORY, MIN_PROCESS_MEMORY / (1024.0 * 1024.0));
         }
     }
     
-    LOG_INFO("sum_process_memory_from_nvml: Total usage = %llu bytes (%.2f MiB)", 
+    LOG_INFO("sum_process_memory_from_nvml: Total usage (current user only) = %llu bytes (%.2f MiB)", 
              (unsigned long long)total_usage, total_usage / (1024.0 * 1024.0));
     
     return total_usage;
