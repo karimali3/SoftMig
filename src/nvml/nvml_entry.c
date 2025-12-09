@@ -39,7 +39,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
                                                   unsigned int *infoCount,
                                                   nvmlProcessInfo_t *infos) {
   // Get all processes first
-  unsigned int original_count = *infoCount;
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
   unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
   
@@ -1574,7 +1573,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos) {
   // Get all processes first
-  unsigned int original_count = *infoCount;
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
   unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
   
